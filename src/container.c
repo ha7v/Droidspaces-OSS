@@ -805,6 +805,15 @@ static int start_rootfs_locked(struct ds_config *cfg, int *lock_fd,
       android_optimizations(1);
   }
 
+  /* 5b. Android storage: wait for MediaProvider's FUSE mount here, in the
+   * parent, before the container exists. The bind in boot.c takes whatever is
+   * at /storage/emulated/0, and before the mount lands that is vold's empty
+   * placeholder on the /storage tmpfs, which the container would then carry for
+   * its whole life. Waiting in the boot instead would spend init's exec
+   * watchdog, which is the same 30 seconds. */
+  if (cfg->android_storage)
+    android_wait_for_storage();
+
   /* 6. Pipe for synchronization */
   if (pipe(sync_pipe) < 0) {
     ds_error("pipe failed: %s", strerror(errno));

@@ -421,9 +421,8 @@ int internal_boot(struct ds_config *cfg) {
     ds_warn("Failed to mount tmpfs at /tmp: %s", strerror(errno));
 
   /* 15. Android-specific storage */
-  if (cfg->android_storage) {
-    android_setup_storage(".");
-  }
+  if (cfg->android_storage && android_setup_storage(".") < 0)
+    ds_warn("Container continues without Android storage.");
 
   /* 16. Custom bind mounts */
   if (!cfg->reboot_cycle && cfg->bind_count > 0)

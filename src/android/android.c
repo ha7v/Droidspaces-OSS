@@ -106,6 +106,89 @@ void android_remount_data_suid(void) {
 
 /* Storage */
 
+/* Shared storage is a FUSE mount served by MediaProvider since Android 11
+ * (sdcardfs before that). The filesystem type is the test that matters: until
+ * that mount exists, vold's /storage tmpfs already holds an empty
+ * /storage/emulated/0 directory, so stat() and access() both succeed and a
+ * bind of it silently captures an empty, RAM-backed directory. Nothing ever
+ * lands there, and whatever is written to it dies with the mount. */
+#ifndef FUSE_SUPER_MAGIC
+#define FUSE_SUPER_MAGIC 0x65735546
+#endif
+#ifndef SDCARD_FS_MAGIC
+#define SDCARD_FS_MAGIC 0x5dca2f04
+#endif
+
+/* Seconds to wait for MediaProvider to publish the mount. service.sh already
+ * waits before autostarting; this covers a start from the CLI or the app on a
+ * device that has not finished booting yet. */
+#define DS_STORAGE_WAIT_SECS 30
+
+/* 1 when path is served by real shared storage, with the type name left in
+ * *fstype for the log. 0 while it is still vold's empty placeholder on the
+ * /storage tmpfs, or nothing at all. Anything that is not RAM-backed is taken
+ * as real: a filesystem type this build has never heard of is not a reason to
+ * refuse a mount that would otherwise work. */
+static int android_storage_is_live(const char *path, const char **fstype) {
+  struct statfs sfs;
+
+  if (statfs(path, &sfs) < 0) {
+    *fstype = "unreachable";
+    return 0;
+  }
+
+  switch ((unsigned long)sfs.f_type) {
+  case TMPFS_MAGIC:
+    *fstype = "tmpfs";
+    return 0;
+  case RAMFS_MAGIC:
+    *fstype = "ramfs";
+    return 0;
+  case FUSE_SUPER_MAGIC:
+    *fstype = "fuse";
+    return 1;
+  case SDCARD_FS_MAGIC:
+    *fstype = "sdcardfs";
+    return 1;
+  default:
+    *fstype = "other";
+    return 1;
+  }
+}
+
+/* Waits for MediaProvider's FUSE mount, called from the start path before the
+ * container's boot. The wait cannot live in the boot: init's exec watchdog is
+ * the same 30 seconds, and spending them there reports a healthy container as
+ * failed to boot. Returns 1 when storage is there, 0 when it never showed up. */
+int android_wait_for_storage(void) {
+  const char *storage_src = "/storage/emulated/0";
+  const char *fstype = "unknown";
+  int waited = 0;
+
+  if (!is_android())
+    return 1;
+
+  while (!android_storage_is_live(storage_src, &fstype)) {
+    if (waited == 0)
+      ds_log("Android storage is not mounted yet (%s at %s), waiting up to "
+             "%ds...",
+             fstype, storage_src, DS_STORAGE_WAIT_SECS);
+    if (waited >= DS_STORAGE_WAIT_SECS) {
+      ds_warn("Android storage at %s is still %s after %ds: MediaProvider has "
+              "not published its FUSE mount. Starting without it; start the "
+              "container again once the phone has finished booting.",
+              storage_src, fstype, DS_STORAGE_WAIT_SECS);
+      return 0;
+    }
+    sleep(1);
+    waited++;
+  }
+  if (waited)
+    ds_log("Android storage is ready (%s, waited %ds)", fstype, waited);
+
+  return 1;
+}
+
 int android_setup_storage(const char *rootfs_path) {
   if (!is_android()) {
     return 0;
@@ -117,7 +200,21 @@ int android_setup_storage(const char *rootfs_path) {
   }
 
   const char *storage_src = "/storage/emulated/0";
+  const char *fstype = "unknown";
   struct stat st;
+
+  /* The wait happened in the start path (android_wait_for_storage). What is at
+   * the path now is either the real mount or vold's placeholder on the tmpfs
+   * shadow, and the placeholder must not be bound: it answers stat() and
+   * access(), so the container would carry an empty RAM-backed directory that
+   * never picks up the real storage, and say nothing about it. */
+  if (!android_storage_is_live(storage_src, &fstype)) {
+    ds_warn("Android storage at %s is %s, not binding it: the MediaProvider "
+            "mount is not there yet. /storage/emulated/0 stays empty until "
+            "the container is started again.",
+            storage_src, fstype);
+    return -1;
+  }
 
   if (stat(storage_src, &st) < 0 || !S_ISDIR(st.st_mode) ||
       access(storage_src, R_OK) < 0) {

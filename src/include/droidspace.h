@@ -661,6 +661,7 @@ void ds_set_selinux_permissive(int enable);
 int ds_get_selinux_status(void);
 void android_remount_data_suid(void);
 int android_setup_storage(const char *rootfs_path);
+int android_wait_for_storage(void);
 int android_seccomp_setup(int privileged_mask);
 int ds_seccomp_apply_minimal(int privileged_mask, int sandboxing_allowed);
 
